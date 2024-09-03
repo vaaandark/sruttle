@@ -37,11 +37,11 @@ fn try_sruttle(ctx: ProbeContext) -> Result<u32, u32> {
     let tg = unsafe { bpf_probe_read_kernel(&(*cfs_rq).tg) }.or(Err(1u32))?;
     let cgroup = unsafe { bpf_probe_read_kernel(&(*tg).css.cgroup) }.or(Err(1u32))?;
     let kn = unsafe { bpf_probe_read_kernel(&(*cgroup).kn) }.or(Err(1u32))?;
-    let cgroup_id = unsafe { bpf_probe_read_kernel(&(*kn).id.id) }.or(Err(1u32))?;
+    let cgroup_inode = unsafe { bpf_probe_read_kernel(&(*kn).id.__bindgen_anon_1.ino) }.or(Err(1u32))?;
 
     let packet_log = unsafe { PACKETLOGS.get_ptr_mut(0).ok_or(1u32)?.as_mut() }.ok_or(1u32)?;
     packet_log.throttled_us = throttled_us;
-    packet_log.cgroup_id = cgroup_id;
+    packet_log.cgroup_inode = cgroup_inode;
     EVENTS.output(&ctx, packet_log, 0);
     Ok(0)
 }

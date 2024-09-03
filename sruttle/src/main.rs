@@ -1,7 +1,9 @@
 use std::collections::HashMap;
+use std::os::unix::fs::MetadataExt;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Ok, Result};
+use anyhow::Result;
 use aya::maps::AsyncPerfEventArray;
 use aya::programs::KProbe;
 use aya::util::online_cpus;
@@ -12,19 +14,20 @@ use lazy_static::lazy_static;
 use log::{debug, info, warn};
 use sruttle_common::PacketLog;
 use tokio::{signal, task};
+use walkdir::WalkDir;
 
 #[derive(Debug, Default)]
-struct ThrottledStatPerCpu(HashMap<u64, u64>);
+struct ThrottledStatPerCpu(HashMap<u32, u64>);
 
 impl ThrottledStatPerCpu {
-    fn insert(&mut self, cgroup_id: u64, throttled_us: u64) {
-        let old = *self.0.get(&cgroup_id).unwrap_or(&0);
+    fn insert(&mut self, cgroup_inode: u32, throttled_us: u64) {
+        let old = *self.0.get(&cgroup_inode).unwrap_or(&0);
         let new = old + throttled_us;
-        _ = self.0.insert(cgroup_id, new);
+        _ = self.0.insert(cgroup_inode, new);
     }
 
     fn insert_by_packet_log(&mut self, packet_log: &PacketLog) {
-        self.insert(packet_log.cgroup_id, packet_log.throttled_us)
+        self.insert(packet_log.cgroup_inode, packet_log.throttled_us)
     }
 }
 
@@ -46,14 +49,14 @@ impl ThrottledStat {
         self.data[idx].clone()
     }
 
-    fn gather(&self) -> HashMap<u64, u64> {
+    fn gather(&self) -> HashMap<u32, u64> {
         let mut result = HashMap::new();
         self.data.iter().for_each(|d| {
             let stat = d.lock().unwrap();
-            stat.0.iter().for_each(|(&cgroup_id, &throttled_us)| {
-                let old = *result.get(&cgroup_id).unwrap_or(&0);
+            stat.0.iter().for_each(|(&cgroup_inode, &throttled_us)| {
+                let old = *result.get(&cgroup_inode).unwrap_or(&0);
                 let new = old + throttled_us;
-                let _ = result.insert(cgroup_id, new);
+                let _ = result.insert(cgroup_inode, new);
             });
         });
         result
@@ -62,6 +65,22 @@ impl ThrottledStat {
 
 lazy_static! {
     static ref THROTTLED_STAT: ThrottledStat = ThrottledStat::new(online_cpus().unwrap().len());
+}
+
+fn path_from_inode(inode: u64) -> Vec<PathBuf> {
+    WalkDir::new("/sys/fs/cgroup")
+        .into_iter()
+        .filter_map(|e| {
+            if let Ok(dir) = e {
+                if let Ok(meta) = dir.metadata() {
+                    if meta.ino() == inode {
+                        return Some(dir.into_path());
+                    }
+                }
+            }
+            None
+        })
+        .collect::<Vec<PathBuf>>()
 }
 
 #[tokio::main]
@@ -123,10 +142,16 @@ async fn main() -> Result<(), anyhow::Error> {
 
     info!("Waiting for Ctrl-C...");
     signal::ctrl_c().await?;
-    info!("Exiting...");
 
     let stat = THROTTLED_STAT.gather();
-    println!("{:?}", stat);
+    println!("cgroup-path\tthrottled_us");
+    stat.iter().for_each(|(&inode, &throttled_us)| {
+        if let Some(path) = path_from_inode(inode as u64).first() {
+            println!("{}\t{}", path.to_str().unwrap(), throttled_us);
+        }
+    });
+
+    info!("Exiting...");
 
     Ok(())
 }
